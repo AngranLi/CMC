@@ -18,13 +18,13 @@ import tensorboard_logger as tb_logger
 from torchvision import transforms, datasets
 from util import adjust_learning_rate, AverageMeter
 
-from model_qs.resnet import InsResNet50
+from models.resnet import InsResNet50
 from NCE.NCEAverage import MemoryInsDis
 from NCE.NCEAverage import MemoryMoCo
 from NCE.NCECriterion import NCECriterion
 from NCE.NCECriterion import NCESoftmaxLoss
 
-from dataset import ImageFolderInstance
+from datasets.img_datasets import ImageFolderInstance
 
 try:
     from apex import amp, optimizers
@@ -39,27 +39,27 @@ def parse_option():
 
     parser = argparse.ArgumentParser('argument for training')
 
-    parser.add_argument('--print_freq', type=int, default=10, help='print frequency')
-    parser.add_argument('--tb_freq', type=int, default=500, help='tb frequency')
-    parser.add_argument('--save_freq', type=int, default=10, help='save frequency')
-    parser.add_argument('--batch_size', type=int, default=128, help='batch_size')
-    parser.add_argument('--num_workers', type=int, default=18, help='num of workers to use')
-    parser.add_argument('--epochs', type=int, default=240, help='number of training epochs')
+    parser.add_argument('--print_freq', type=int, default=20, help='print frequency')
+    parser.add_argument('--tb_freq', type=int, default=500, help='tensorboard frequency')
+    parser.add_argument('--save_freq', type=int, default=20, help='save frequency')
+    parser.add_argument('--batch_size', type=int, default=64, help='batch_size')
+    parser.add_argument('--num_workers', type=int, default=4, help='num of workers to use')
+    parser.add_argument('--epochs', type=int, default=300, help='number of training epochs')
 
     # optimization
     parser.add_argument('--learning_rate', type=float, default=0.03, help='learning rate')
-    parser.add_argument('--lr_decay_epochs', type=str, default='120,160,200', help='where to decay lr, can be a list')
+    parser.add_argument('--lr_decay_epochs', type=str, default='120,180,250', help='where to decay lr, can be a list')
     parser.add_argument('--lr_decay_rate', type=float, default=0.1, help='decay rate for learning rate')
     parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam')
     parser.add_argument('--beta2', type=float, default=0.999, help='beta2 for Adam')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='weight decay')
-    parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
+    parser.add_argument('--momentum', type=float, default=0.9, help='momentum for optimizer')
 
     # crop
     parser.add_argument('--crop', type=float, default=0.2, help='minimum crop')
 
     # dataset
-    parser.add_argument('--dataset', type=str, default='imagenet100', choices=['imagenet100', 'imagenet'])
+    parser.add_argument('--dataset', type=str, default='imagenet200', choices=['imagenet200', 'imagenet'])
 
     # resume
     parser.add_argument('--resume', default='', type=str, metavar='PATH',
@@ -78,8 +78,8 @@ def parse_option():
 
     # loss function
     parser.add_argument('--softmax', action='store_true', help='using softmax contrastive loss rather than NCE')
-    parser.add_argument('--nce_k', type=int, default=16384)
-    parser.add_argument('--nce_t', type=float, default=0.07)
+    parser.add_argument('--nce_k', type=int, default=16384, help='size of memory queue')
+    parser.add_argument('--nce_t', type=float, default=0.07, help='temperature tau that modulates the distribution')
     parser.add_argument('--nce_m', type=float, default=0.5)
 
     # memory setting
@@ -92,7 +92,7 @@ def parse_option():
     opt = parser.parse_args()
 
     # set the path according to the environment
-    opt.data_folder = '/nasty/data/common/{}'.format(opt.dataset)
+    opt.data_folder = '/home/angran/Pictures/{}'.format(opt.dataset)
     opt.model_path = './checkpoints/{}_models'.format(opt.dataset)
     opt.tb_path = './checkpoints/{}_tensorboard'.format(opt.dataset)
 
@@ -106,11 +106,9 @@ def parse_option():
         opt.lr_decay_epochs.append(int(it))
 
     opt.method = 'softmax' if opt.softmax else 'nce'
-    prefix = 'MoCo{}'.format(opt.alpha) #if opt.moco else 'InsDis'
-
-    opt.model_name = '{}_{}_{}_{}_lr_{}_decay_{}_bsz_{}_crop_{}'.format(prefix, opt.method, opt.nce_k, opt.model,
-                                                                        opt.learning_rate, opt.weight_decay,
-                                                                        opt.batch_size, opt.crop)
+    # prefix = 'MoCo{}'.format(opt.alpha) #if opt.moco else 'InsDis'
+    # opt.model_name = '{}_lr_{}'.format(prefix, opt.learning_rate)
+    opt.model_name = 'MoCo_lr_{}'.format(opt.learning_rate)
 
     if opt.warm:
         opt.model_name = '{}_warm'.format(opt.model_name)
@@ -151,7 +149,7 @@ def train_moco(epoch, train_loader, model_q, model_k, contrast, criterion, optim
     """
 
     model_q.train()
-    model_k.eval()
+    model_k.eval() # equivalent with model_k.train(False)
 
     def set_bn_train(m):
         classname = m.__class__.__name__
@@ -168,7 +166,7 @@ def train_moco(epoch, train_loader, model_q, model_k, contrast, criterion, optim
     for idx, (inputs, _, index) in enumerate(train_loader):
         data_time.update(time.time() - end)
 
-        bsz = inputs.size(0)
+        bsz = inputs.size(0) # batch size
 
         inputs = inputs.float()
         if opt.gpu is not None:
@@ -178,15 +176,15 @@ def train_moco(epoch, train_loader, model_q, model_k, contrast, criterion, optim
         index = index.cuda(opt.gpu, non_blocking=True)
 
         # ===================forward=====================
-        x1, x2 = torch.split(inputs, [3, 3], dim=1)
+        x_q, x_k = torch.split(inputs, [3, 3], dim=1)
 
         # ids for ShuffleBN
         shuffle_ids, reverse_ids = get_shuffle_ids(bsz)
 
-        feat_q = model_q(x1)
+        feat_q = model_q(x_q)
         with torch.no_grad():
-            x2 = x2[shuffle_ids]
-            feat_k = model_k(x2)
+            x_k = x_k[shuffle_ids]
+            feat_k = model_k(x_k)
             feat_k = feat_k[reverse_ids]
 
         out = contrast(feat_q, feat_k)
@@ -304,7 +302,7 @@ def main():
                                 weight_decay=args.weight_decay)
 
     cudnn.benchmark = True
-
+    '''
     # mixed precision training, speeds up training, however is likely to harm the downstream classification.
     if args.amp:
         model_q, optimizer = amp.initialize(model_q, optimizer, opt_level=args.opt_level)
@@ -313,8 +311,10 @@ def main():
                                         momentum=0,
                                         weight_decay=0)
         model_k, optimizer_ema = amp.initialize(model_k, optimizer_ema, opt_level=args.opt_level)
+    '''
 
     args.start_epoch = 1
+    '''
     # optionally resume from a checkpoint
     if args.resume:
         if os.path.isfile(args.resume):
@@ -337,6 +337,7 @@ def main():
             torch.cuda.empty_cache()
         else:
             print("=> no checkpoint found at '{}'".format(args.resume))
+    '''
 
     # tensorboard
     logger = tb_logger.Logger(logdir=args.tb_folder, flush_secs=2)
@@ -375,27 +376,6 @@ def main():
             # help release GPU memory
             del state
 
-        ''' Redundant code?
-        # saving the model
-        print('==> Saving...')
-        state = {
-            'opt': args,
-            'model_q': model_q.state_dict(),
-            'contrast': contrast.state_dict(),
-            'optimizer': optimizer.state_dict(),
-            'epoch': epoch,
-        }
-        state['model_k'] = model_k.state_dict()
-        if args.amp:
-            state['amp'] = amp.state_dict()
-        save_file = os.path.join(args.model_folder, 'current.pth')
-        torch.save(state, save_file)
-        if epoch % args.save_freq == 0:
-            save_file = os.path.join(args.model_folder, 'ckpt_epoch_{epoch}.pth'.format(epoch=epoch))
-            torch.save(state, save_file)
-        # help release GPU memory
-        del state
-        '''
         torch.cuda.empty_cache()
 
 

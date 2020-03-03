@@ -1,7 +1,6 @@
 """
-evaluating MoCo and Instance Discrimination
+evaluating MoCo 
 
-InsDis: Unsupervised feature learning via non-parametric instance discrimination
 MoCo: Momentum Contrast for Unsupervised Visual Representation Learning
 
 """
@@ -15,7 +14,6 @@ import torch.optim as optim
 import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
 import argparse
-import socket
 import torch.multiprocessing as mp
 import torch.distributed as dist
 
@@ -30,15 +28,13 @@ from models.LinearModel import LinearClassifierResNet
 
 def parse_option():
 
-    hostname = socket.gethostname()
-
     parser = argparse.ArgumentParser('argument for training')
 
     parser.add_argument('--print_freq', type=int, default=10, help='print frequency')
     parser.add_argument('--tb_freq', type=int, default=500, help='tb frequency')
     parser.add_argument('--save_freq', type=int, default=5, help='save frequency')
     parser.add_argument('--batch_size', type=int, default=256, help='batch_size')
-    parser.add_argument('--num_workers', type=int, default=32, help='num of workers to use')
+    parser.add_argument('--num_workers', type=int, default=4, help='num of workers to use')
     parser.add_argument('--epochs', type=int, default=60, help='number of training epochs')
 
     # optimization
@@ -59,7 +55,7 @@ def parse_option():
     parser.add_argument('--crop', type=float, default=0.2, help='minimum crop')
 
     # dataset
-    parser.add_argument('--dataset', type=str, default='imagenet100', choices=['imagenet100', 'imagenet'])
+    parser.add_argument('--dataset', type=str, default='imagenet200', choices=['imagenet200', 'imagenet'])
 
     # resume
     parser.add_argument('--resume', default='', type=str, metavar='PATH',
@@ -85,11 +81,10 @@ def parse_option():
     opt = parser.parse_args()
 
     # set the path according to the environment
-    if hostname.startswith('visiongpu'):
-        opt.data_folder = '/dev/shm/yonglong/{}'.format(opt.dataset)
-        opt.save_path = '/data/vision/phillip/rep-learn/Pedesis/CMC/{}_linear'.format(opt.dataset)
-        opt.tb_path = '/data/vision/phillip/rep-learn/Pedesis/CMC/{}_linear_tensorboard'.format(opt.dataset)
-
+    opt.data_folder = '/home/angran/Pictures/{}'.format(opt.dataset)
+    opt.save_path = './checkpoints/{}_models'.format(opt.dataset)
+    opt.tb_path = './checkpoints/{}_tensorboard'.format(opt.dataset)
+    
     if opt.dataset == 'imagenet':
         if 'alexnet' not in opt.model:
             opt.crop = 0.08
@@ -100,8 +95,7 @@ def parse_option():
         opt.lr_decay_epochs.append(int(it))
 
     opt.model_name = opt.model_path.split('/')[-2]
-    opt.model_name = '{}_bsz_{}_lr_{}_decay_{}_crop_{}'.format(opt.model_name, opt.batch_size, opt.learning_rate,
-                                                               opt.weight_decay, opt.crop)
+    opt.model_name = '{}_lr_{}_decay_{}'.format(opt.model_name, opt.learning_rate, opt.weight_decay)
 
     if opt.amp:
         opt.model_name = '{}_amp_{}'.format(opt.model_name, opt.opt_level)
@@ -123,227 +117,12 @@ def parse_option():
     if not os.path.isdir(opt.save_folder):
         os.makedirs(opt.save_folder)
 
-    if opt.dataset == 'imagenet100':
-        opt.n_label = 100
+    if opt.dataset == 'imagenet200':
+        opt.n_label = 200
     if opt.dataset == 'imagenet':
         opt.n_label = 1000
 
     return opt
-
-
-def main():
-
-    global best_acc1
-    best_acc1 = 0
-
-    args = parse_option()
-
-    if args.gpu is not None:
-        print("Use GPU: {} for training".format(args.gpu))
-
-    # set the data loader
-    train_folder = os.path.join(args.data_folder, 'train')
-    val_folder = os.path.join(args.data_folder, 'val')
-
-    image_size = 224
-    crop_padding = 32
-    mean = [0.485, 0.456, 0.406]
-    std = [0.229, 0.224, 0.225]
-    normalize = transforms.Normalize(mean=mean, std=std)
-
-    if args.aug == 'NULL':
-        train_transform = transforms.Compose([
-            transforms.RandomResizedCrop(image_size, scale=(args.crop, 1.)),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            normalize,
-        ])
-    elif args.aug == 'CJ':
-        train_transform = transforms.Compose([
-            transforms.RandomResizedCrop(image_size, scale=(args.crop, 1.)),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.ColorJitter(0.4, 0.4, 0.4, 0.4),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            normalize,
-        ])
-    else:
-        raise NotImplemented('augmentation not supported: {}'.format(args.aug))
-
-    train_dataset = datasets.ImageFolder(train_folder, train_transform)
-    val_dataset = datasets.ImageFolder(
-        val_folder,
-        transforms.Compose([
-            transforms.Resize(image_size + crop_padding),
-            transforms.CenterCrop(image_size),
-            transforms.ToTensor(),
-            normalize,
-        ])
-    )
-
-    print(len(train_dataset))
-    train_sampler = None
-
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-        num_workers=args.num_workers, pin_memory=True, sampler=train_sampler)
-    val_loader = torch.utils.data.DataLoader(
-        val_dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=args.num_workers, pin_memory=True)
-
-    # create model and optimizer
-    if args.model == 'resnet50':
-        model = InsResNet50()
-        classifier = LinearClassifierResNet(args.layer, args.n_label, 'avg', 1)
-    elif args.model == 'resnet50x2':
-        model = InsResNet50(width=2)
-        classifier = LinearClassifierResNet(args.layer, args.n_label, 'avg', 2)
-    elif args.model == 'resnet50x4':
-        model = InsResNet50(width=4)
-        classifier = LinearClassifierResNet(args.layer, args.n_label, 'avg', 4)
-    else:
-        raise NotImplementedError('model not supported {}'.format(args.model))
-
-    print('==> loading pre-trained model')
-    ckpt = torch.load(args.model_path)
-    model.load_state_dict(ckpt['model'])
-    print("==> loaded checkpoint '{}' (epoch {})".format(args.model_path, ckpt['epoch']))
-    print('==> done')
-
-    model = model.cuda()
-    classifier = classifier.cuda()
-
-    criterion = torch.nn.CrossEntropyLoss().cuda(args.gpu)
-
-    if not args.adam:
-        optimizer = torch.optim.SGD(classifier.parameters(),
-                                    lr=args.learning_rate,
-                                    momentum=args.momentum,
-                                    weight_decay=args.weight_decay)
-    else:
-        optimizer = torch.optim.Adam(classifier.parameters(),
-                                     lr=args.learning_rate,
-                                     betas=(args.beta1, args.beta2),
-                                     weight_decay=args.weight_decay,
-                                     eps=1e-8)
-
-    model.eval()
-    cudnn.benchmark = True
-
-    # set mixed precision training
-    # if args.amp:
-    #     model = amp.initialize(model, opt_level=args.opt_level)
-    #     classifier, optimizer = amp.initialize(classifier, optimizer, opt_level=args.opt_level)
-
-    # optionally resume from a checkpoint
-    args.start_epoch = 1
-    if args.resume:
-        if os.path.isfile(args.resume):
-            print("=> loading checkpoint '{}'".format(args.resume))
-            checkpoint = torch.load(args.resume, map_location='cpu')
-            # checkpoint = torch.load(args.resume)
-            args.start_epoch = checkpoint['epoch'] + 1
-            classifier.load_state_dict(checkpoint['classifier'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            best_acc1 = checkpoint['best_acc1']
-            best_acc1 = best_acc1.cuda()
-            print("=> loaded checkpoint '{}' (epoch {})"
-                  .format(args.resume, checkpoint['epoch']))
-            if 'opt' in checkpoint.keys():
-                # resume optimization hyper-parameters
-                print('=> resume hyper parameters')
-                if 'bn' in vars(checkpoint['opt']):
-                    print('using bn: ', checkpoint['opt'].bn)
-                if 'adam' in vars(checkpoint['opt']):
-                    print('using adam: ', checkpoint['opt'].adam)
-                if 'cosine' in vars(checkpoint['opt']):
-                    print('using cosine: ', checkpoint['opt'].cosine)
-                args.learning_rate = checkpoint['opt'].learning_rate
-                # args.lr_decay_epochs = checkpoint['opt'].lr_decay_epochs
-                args.lr_decay_rate = checkpoint['opt'].lr_decay_rate
-                args.momentum = checkpoint['opt'].momentum
-                args.weight_decay = checkpoint['opt'].weight_decay
-                args.beta1 = checkpoint['opt'].beta1
-                args.beta2 = checkpoint['opt'].beta2
-            del checkpoint
-            torch.cuda.empty_cache()
-        else:
-            print("=> no checkpoint found at '{}'".format(args.resume))
-
-    # set cosine annealing scheduler
-    if args.cosine:
-
-        # last_epoch = args.start_epoch - 2
-        # eta_min = args.learning_rate * (args.lr_decay_rate ** 3) * 0.1
-        # scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs, eta_min, last_epoch)
-
-        eta_min = args.learning_rate * (args.lr_decay_rate ** 3) * 0.1
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs, eta_min, -1)
-        # dummy loop to catch up with current epoch
-        for i in range(1, args.start_epoch):
-            scheduler.step()
-
-    # tensorboard
-    logger = tb_logger.Logger(logdir=args.tb_folder, flush_secs=2)
-
-    # routine
-    for epoch in range(args.start_epoch, args.epochs + 1):
-
-        if args.cosine:
-            scheduler.step()
-        else:
-            adjust_learning_rate(epoch, args, optimizer)
-        print("==> training...")
-
-        time1 = time.time()
-        train_acc, train_acc5, train_loss = train(epoch, train_loader, model, classifier, criterion, optimizer, args)
-        time2 = time.time()
-        print('train epoch {}, total time {:.2f}'.format(epoch, time2 - time1))
-
-        logger.log_value('train_acc', train_acc, epoch)
-        logger.log_value('train_acc5', train_acc5, epoch)
-        logger.log_value('train_loss', train_loss, epoch)
-        logger.log_value('learning_rate', optimizer.param_groups[0]['lr'], epoch)
-
-        print("==> testing...")
-        test_acc, test_acc5, test_loss = validate(val_loader, model, classifier, criterion, args)
-
-        logger.log_value('test_acc', test_acc, epoch)
-        logger.log_value('test_acc5', test_acc5, epoch)
-        logger.log_value('test_loss', test_loss, epoch)
-
-        # save the best model
-        if test_acc > best_acc1:
-            best_acc1 = test_acc
-            state = {
-                'opt': args,
-                'epoch': epoch,
-                'classifier': classifier.state_dict(),
-                'best_acc1': best_acc1,
-                'optimizer': optimizer.state_dict(),
-            }
-            save_name = '{}_layer{}.pth'.format(args.model, args.layer)
-            save_name = os.path.join(args.save_folder, save_name)
-            print('saving best model!')
-            torch.save(state, save_name)
-
-        # save model
-        if epoch % args.save_freq == 0:
-            print('==> Saving...')
-            state = {
-                'opt': args,
-                'epoch': epoch,
-                'classifier': classifier.state_dict(),
-                'best_acc1': test_acc,
-                'optimizer': optimizer.state_dict(),
-            }
-            save_name = 'ckpt_epoch_{epoch}.pth'.format(epoch=epoch)
-            save_name = os.path.join(args.save_folder, save_name)
-            print('saving regular model!')
-            torch.save(state, save_name)
-
-        # tensorboard logger
-        pass
 
 
 def set_lr(optimizer, lr):
@@ -480,6 +259,223 @@ def accuracy(output, target, topk=(1,)):
             correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
+
+
+def main():
+
+    global best_acc1
+    best_acc1 = 0
+
+    args = parse_option()
+
+    if args.gpu is not None:
+        print("Use GPU: {} for training".format(args.gpu))
+
+    # set the data loader
+    train_folder = os.path.join(args.data_folder, 'train')
+    val_folder = os.path.join(args.data_folder, 'val')
+
+    image_size = 224
+    crop_padding = 32
+    mean = [0.485, 0.456, 0.406]
+    std = [0.229, 0.224, 0.225]
+    normalize = transforms.Normalize(mean=mean, std=std)
+
+    if args.aug == 'NULL':
+        train_transform = transforms.Compose([
+            transforms.RandomResizedCrop(image_size, scale=(args.crop, 1.)),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            normalize,
+        ])
+    elif args.aug == 'CJ':
+        train_transform = transforms.Compose([
+            transforms.RandomResizedCrop(image_size, scale=(args.crop, 1.)),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.ColorJitter(0.4, 0.4, 0.4, 0.4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            normalize,
+        ])
+    else:
+        raise NotImplementedError('augmentation not supported: {}'.format(args.aug))
+
+    train_dataset = datasets.ImageFolder(train_folder, train_transform)
+    val_dataset = datasets.ImageFolder(
+        val_folder,
+        transforms.Compose([
+            transforms.Resize(image_size + crop_padding),
+            transforms.CenterCrop(image_size),
+            transforms.ToTensor(),
+            normalize,
+        ])
+    )
+
+    print(len(train_dataset))
+    train_sampler = None
+
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
+        num_workers=args.num_workers, pin_memory=True, sampler=train_sampler)
+    val_loader = torch.utils.data.DataLoader(
+        val_dataset, batch_size=args.batch_size, shuffle=False,
+        num_workers=args.num_workers, pin_memory=True)
+
+    # create model and optimizer
+    if args.model == 'resnet50':
+        model = InsResNet50()
+        classifier = LinearClassifierResNet(args.layer, args.n_label, 'avg', 1)
+    elif args.model == 'resnet50x2':
+        model = InsResNet50(width=2)
+        classifier = LinearClassifierResNet(args.layer, args.n_label, 'avg', 2)
+    elif args.model == 'resnet50x4':
+        model = InsResNet50(width=4)
+        classifier = LinearClassifierResNet(args.layer, args.n_label, 'avg', 4)
+    else:
+        raise NotImplementedError('model not supported {}'.format(args.model))
+
+    print('==> loading pre-trained model')
+    ckpt = torch.load(args.model_path)
+    model.load_state_dict(ckpt['model_q'])
+    print("==> loaded checkpoint '{}' (epoch {})".format(args.model_path, ckpt['epoch']))
+    print('==> done')
+
+    model = model.cuda()
+    classifier = classifier.cuda()
+
+    criterion = torch.nn.CrossEntropyLoss().cuda(args.gpu)
+
+    if not args.adam:
+        optimizer = torch.optim.SGD(classifier.parameters(),
+                                    lr=args.learning_rate,
+                                    momentum=args.momentum,
+                                    weight_decay=args.weight_decay)
+    else:
+        optimizer = torch.optim.Adam(classifier.parameters(),
+                                     lr=args.learning_rate,
+                                     betas=(args.beta1, args.beta2),
+                                     weight_decay=args.weight_decay,
+                                     eps=1e-8)
+
+    model.eval()
+    cudnn.benchmark = True
+
+    # set mixed precision training
+    # if args.amp:
+    #     model = amp.initialize(model, opt_level=args.opt_level)
+    #     classifier, optimizer = amp.initialize(classifier, optimizer, opt_level=args.opt_level)
+
+    # optionally resume from a checkpoint
+    args.start_epoch = 1
+    '''
+    if args.resume:
+        if os.path.isfile(args.resume):
+            print("=> loading checkpoint '{}'".format(args.resume))
+            checkpoint = torch.load(args.resume, map_location='cpu')
+            # checkpoint = torch.load(args.resume)
+            args.start_epoch = checkpoint['epoch'] + 1
+            classifier.load_state_dict(checkpoint['classifier'])
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            best_acc1 = checkpoint['best_acc1']
+            best_acc1 = best_acc1.cuda()
+            print("=> loaded checkpoint '{}' (epoch {})"
+                  .format(args.resume, checkpoint['epoch']))
+            if 'opt' in checkpoint.keys():
+                # resume optimization hyper-parameters
+                print('=> resume hyper parameters')
+                if 'bn' in vars(checkpoint['opt']):
+                    print('using bn: ', checkpoint['opt'].bn)
+                if 'adam' in vars(checkpoint['opt']):
+                    print('using adam: ', checkpoint['opt'].adam)
+                if 'cosine' in vars(checkpoint['opt']):
+                    print('using cosine: ', checkpoint['opt'].cosine)
+                args.learning_rate = checkpoint['opt'].learning_rate
+                # args.lr_decay_epochs = checkpoint['opt'].lr_decay_epochs
+                args.lr_decay_rate = checkpoint['opt'].lr_decay_rate
+                args.momentum = checkpoint['opt'].momentum
+                args.weight_decay = checkpoint['opt'].weight_decay
+                args.beta1 = checkpoint['opt'].beta1
+                args.beta2 = checkpoint['opt'].beta2
+            del checkpoint
+            torch.cuda.empty_cache()
+        else:
+            print("=> no checkpoint found at '{}'".format(args.resume))
+    '''
+
+    # set cosine annealing scheduler
+    if args.cosine:
+
+        # last_epoch = args.start_epoch - 2
+        # eta_min = args.learning_rate * (args.lr_decay_rate ** 3) * 0.1
+        # scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs, eta_min, last_epoch)
+
+        eta_min = args.learning_rate * (args.lr_decay_rate ** 3) * 0.1
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs, eta_min, -1)
+        # dummy loop to catch up with current epoch
+        for i in range(1, args.start_epoch):
+            scheduler.step()
+
+    # tensorboard
+    logger = tb_logger.Logger(logdir=args.tb_folder, flush_secs=2)
+
+    # routine
+    for epoch in range(args.start_epoch, args.epochs + 1):
+
+        if args.cosine:
+            scheduler.step()
+        else:
+            adjust_learning_rate(epoch, args, optimizer)
+        print("==> training...")
+
+        time1 = time.time()
+        train_acc, train_acc5, train_loss = train(epoch, train_loader, model, classifier, criterion, optimizer, args)
+        time2 = time.time()
+        print('train epoch {}, total time {:.2f}'.format(epoch, time2 - time1))
+
+        logger.log_value('train_acc', train_acc, epoch)
+        logger.log_value('train_acc5', train_acc5, epoch)
+        logger.log_value('train_loss', train_loss, epoch)
+        logger.log_value('learning_rate', optimizer.param_groups[0]['lr'], epoch)
+
+        print("==> testing...")
+        test_acc, test_acc5, test_loss = validate(val_loader, model, classifier, criterion, args)
+
+        logger.log_value('test_acc', test_acc, epoch)
+        logger.log_value('test_acc5', test_acc5, epoch)
+        logger.log_value('test_loss', test_loss, epoch)
+
+        # save the best model
+        if test_acc > best_acc1:
+            best_acc1 = test_acc
+            state = {
+                'opt': args,
+                'epoch': epoch,
+                'classifier': classifier.state_dict(),
+                'best_acc1': best_acc1,
+                'optimizer': optimizer.state_dict(),
+            }
+            save_name = '{}_layer{}.pth'.format(args.model, args.layer)
+            save_name = os.path.join(args.save_folder, save_name)
+            print('saving best model!')
+            torch.save(state, save_name)
+
+        # save model
+        if epoch % args.save_freq == 0:
+            print('==> Saving...')
+            state = {
+                'opt': args,
+                'epoch': epoch,
+                'classifier': classifier.state_dict(),
+                'best_acc1': test_acc,
+                'optimizer': optimizer.state_dict(),
+            }
+            save_name = 'ckpt_epoch_{epoch}.pth'.format(epoch=epoch)
+            save_name = os.path.join(args.save_folder, save_name)
+            print('saving regular model!')
+            torch.save(state, save_name)
+
+        # tensorboard logger
+        pass
 
 
 if __name__ == '__main__':

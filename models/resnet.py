@@ -243,12 +243,13 @@ class InsResNet50(nn.Module):
     def __init__(self, width=1):
         super(InsResNet50, self).__init__()
         self.encoder = resnet50(width=width)
+        # Make the model run parallelly
         self.encoder = nn.DataParallel(self.encoder)
 
     def forward(self, x, layer=7):
         return self.encoder(x, layer)
 
-
+''' For CMC
 class ResNetV1(nn.Module):
     def __init__(self, name='resnet50'):
         super(ResNetV1, self).__init__()
@@ -331,3 +332,4 @@ class MyResNetsCMC(nn.Module):
 
     def forward(self, x, layer=7):
         return self.encoder(x, layer)
+'''
