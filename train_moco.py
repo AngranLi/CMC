@@ -19,12 +19,15 @@ from torchvision import transforms, datasets
 from util import adjust_learning_rate, AverageMeter
 
 from models.resnet import InsResNet50
+from models.resnet_1d import resnet50
+from models.resnet_2d import ResnetThreshold
 from NCE.NCEAverage import MemoryInsDis
 from NCE.NCEAverage import MemoryMoCo
 from NCE.NCECriterion import NCECriterion
 from NCE.NCECriterion import NCESoftmaxLoss
 
 from datasets.img_datasets import ImageFolderInstance
+from datasets.tms_datasets import TMSDataset
 
 try:
     from apex import amp, optimizers
@@ -115,7 +118,7 @@ def parse_option():
     if opt.amp:
         opt.model_name = '{}_amp_{}'.format(opt.model_name, opt.opt_level)
 
-    opt.model_name = '{}_aug_{}'.format(opt.model_name, opt.aug)
+    # opt.model_name = '{}_aug_{}'.format(opt.model_name, opt.aug)
 
     opt.model_folder = os.path.join(opt.model_path, opt.model_name)
     if not os.path.isdir(opt.model_folder):
@@ -176,6 +179,7 @@ def train_moco(epoch, train_loader, model_q, model_k, contrast, criterion, optim
         index = index.cuda(opt.gpu, non_blocking=True)
 
         # ===================forward=====================
+        # inputs.size(): torch.Size([64, 6, 224, 224])
         x_q, x_k = torch.split(inputs, [3, 3], dim=1)
 
         # ids for ShuffleBN
@@ -263,6 +267,7 @@ def main():
 
     # TOMO
     train_dataset = ImageFolderInstance(data_folder, transform=train_transform, two_crop=True)#args.moco)
+    # train_dataset = TMSDataset(root_dir=data_folder)
     print(len(train_dataset))
     train_sampler = None
     train_loader = torch.utils.data.DataLoader(
@@ -273,6 +278,8 @@ def main():
     n_data = len(train_dataset)
 
     if args.model == 'resnet50':
+        # model_q = ResnetThreshold(resnet50, {'num_classes': 2, 'in_channels': 16})
+        # model_k = ResnetThreshold(resnet50, {'num_classes': 2, 'in_channels': 16})
         model_q = InsResNet50()
         model_k = InsResNet50()
     elif args.model == 'resnet50x2':

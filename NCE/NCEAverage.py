@@ -170,14 +170,14 @@ class MemoryMoCo(nn.Module):
 
         Z = self.params[0].item()
 
-        # pos logit
+        # pos. logits: Nx1
         l_pos = torch.bmm(q.view(batchSize, 1, -1), k.view(batchSize, -1, 1))
         l_pos = l_pos.view(batchSize, 1)
-        # neg logit
+        # neg. logits: NxK
         queue = self.memory.clone()
         l_neg = torch.mm(queue.detach(), q.transpose(1, 0))
         l_neg = l_neg.transpose(0, 1)
-
+        # logits: Nx(1+K)
         out = torch.cat((l_pos, l_neg), dim=1)
 
         if self.use_softmax:
@@ -186,6 +186,7 @@ class MemoryMoCo(nn.Module):
         else:
             out = torch.exp(torch.div(out, self.T))
             if Z < 0:
+                print("out.mean() is {:.3f}".format(out.mean()))
                 self.params[0] = out.mean() * self.outputSize
                 Z = self.params[0].clone().detach().item()
                 print("normalization constant Z is set to {:.1f}".format(Z))

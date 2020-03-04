@@ -215,7 +215,7 @@ class ResNet(nn.Module):
         if layer == 6:
             return x
         x = self.fc(x)
-        x = self.l2norm(x)
+        x = self.l2norm(x) # enforce ||x|| = 1 via L2-normalization
 
         return x
 

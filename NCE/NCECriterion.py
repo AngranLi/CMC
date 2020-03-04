@@ -12,6 +12,7 @@ class NCECriterion(nn.Module):
         super(NCECriterion, self).__init__()
         self.n_data = n_data
 
+    # In all the batches, the first batch is the positive sample, rest are negative samples.
     def forward(self, x):
         bsz = x.shape[0]
         m = x.size(1) - 1
