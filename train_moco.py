@@ -95,7 +95,7 @@ def parse_option():
     opt = parser.parse_args()
 
     # set the path according to the environment
-    opt.data_folder = '/home/angran/Pictures/{}'.format(opt.dataset)
+    opt.data_folder = '/hdd/angran/{}'.format(opt.dataset)
     opt.model_path = './checkpoints/{}_models'.format(opt.dataset)
     opt.tb_path = './checkpoints/{}_tensorboard'.format(opt.dataset)
 
