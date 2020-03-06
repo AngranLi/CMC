@@ -172,13 +172,18 @@ class TMSDataset(Dataset):
         d = loader_current(filepath)
 
         if self.transform:
-            d = self.transform(d)
+            d1 = self.transform[0](d)
+            d2 = self.transform[1](d)
+        else:
+            raise ValueError('There gotta be some transformations!')
 
         # Get the classid
         tags = os.path.basename(os.path.dirname(filepath)).split('_')[2:]
         class_id = self.class_map(tags)
 
-        out = [d]
+        inputs=torch.cat([d1, d2], dim=0)
+
+        out = [inputs]
         if self.get_label:
             out.append(class_id)
         else:

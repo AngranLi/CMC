@@ -6,28 +6,24 @@ MoCo: Momentum Contrast for Unsupervised Visual Representation Learning
 """
 from __future__ import print_function
 
+import argparse
+import importlib
 import os
 import sys
 import time
-import torch
-import torch.backends.cudnn as cudnn
-import argparse
 
 import tensorboard_logger as tb_logger
+import torch
+import torch.backends.cudnn as cudnn
+from torchvision import datasets, transforms
 
-from torchvision import transforms, datasets
-from util import adjust_learning_rate, AverageMeter
-
+from datasets.img_datasets import ImageFolderInstance
 from models.resnet import InsResNet50
 from models.resnet_1d import resnet50
 from models.resnet_2d import ResnetThreshold
-from NCE.NCEAverage import MemoryInsDis
-from NCE.NCEAverage import MemoryMoCo
-from NCE.NCECriterion import NCECriterion
-from NCE.NCECriterion import NCESoftmaxLoss
-
-from datasets.img_datasets import ImageFolderInstance
-from datasets.tms_datasets import TMSDataset
+from NCE.NCEAverage import MemoryInsDis, MemoryMoCo
+from NCE.NCECriterion import NCECriterion, NCESoftmaxLoss
+from util import AverageMeter, adjust_learning_rate
 
 try:
     from apex import amp, optimizers
@@ -37,6 +33,7 @@ except ImportError:
 TODO: python 3.6 ModuleNotFoundError
 """
 
+config = importlib.import_module('configs.tms_1d')
 
 def parse_option():
 
@@ -45,15 +42,15 @@ def parse_option():
     parser.add_argument('--print_freq', type=int, default=20, help='print frequency')
     parser.add_argument('--tb_freq', type=int, default=500, help='tensorboard frequency')
     parser.add_argument('--save_freq', type=int, default=20, help='save frequency')
-    parser.add_argument('--batch_size', type=int, default=64, help='batch_size')
-    parser.add_argument('--num_workers', type=int, default=4, help='num of workers to use')
+    # parser.add_argument('--batch_size', type=int, default=64, help='batch_size')
+    # parser.add_argument('--num_workers', type=int, default=4, help='num of workers to use')
     parser.add_argument('--epochs', type=int, default=300, help='number of training epochs')
 
     # optimization
-    parser.add_argument('--learning_rate', type=float, default=0.03, help='learning rate')
-    parser.add_argument('--lr_decay_epochs', type=str, default='120,180,250', help='where to decay lr, can be a list')
+    parser.add_argument('--learning_rate', type=float, default=0.01, help='learning rate')
+    parser.add_argument('--lr_decay_epochs', type=str, default='100,150,200', help='where to decay lr, can be a list')
     parser.add_argument('--lr_decay_rate', type=float, default=0.1, help='decay rate for learning rate')
-    parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam')
+    parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for Adam')
     parser.add_argument('--beta2', type=float, default=0.999, help='beta2 for Adam')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='weight decay')
     parser.add_argument('--momentum', type=float, default=0.9, help='momentum for optimizer')
@@ -62,7 +59,7 @@ def parse_option():
     parser.add_argument('--crop', type=float, default=0.2, help='minimum crop')
 
     # dataset
-    parser.add_argument('--dataset', type=str, default='imagenet200', choices=['imagenet200', 'imagenet'])
+    parser.add_argument('--dataset', type=str, default='imagenet200')
 
     # resume
     parser.add_argument('--resume', default='', type=str, metavar='PATH',
@@ -166,7 +163,7 @@ def train_moco(epoch, train_loader, model_q, model_k, contrast, criterion, optim
     prob_meter = AverageMeter()
 
     end = time.time()
-    for idx, (inputs, _, index) in enumerate(train_loader):
+    for idx, (inputs, _,) in enumerate(train_loader):
         data_time.update(time.time() - end)
 
         bsz = inputs.size(0) # batch size
@@ -176,12 +173,11 @@ def train_moco(epoch, train_loader, model_q, model_k, contrast, criterion, optim
             inputs = inputs.cuda(opt.gpu, non_blocking=True)
         else:
             inputs = inputs.cuda()
-        index = index.cuda(opt.gpu, non_blocking=True)
 
         # ===================forward=====================
         # inputs.size(): torch.Size([64, 6, 224, 224])
-        x_q, x_k = torch.split(inputs, [3, 3], dim=1)
-
+        x_q, x_k = torch.split(inputs, [12, 12], dim=1)
+        
         # ids for ShuffleBN
         shuffle_ids, reverse_ids = get_shuffle_ids(bsz)
 
@@ -224,7 +220,7 @@ def train_moco(epoch, train_loader, model_q, model_k, contrast, criterion, optim
                   'prob {prob.val:.3f} ({prob.avg:.3f})'.format(
                    epoch, idx + 1, len(train_loader), batch_time=batch_time,
                    data_time=data_time, loss=loss_meter, prob=prob_meter))
-            print(out.shape)
+            # print("Memory bank size: ", out.shape)
             sys.stdout.flush()
 
     return loss_meter.avg, prob_meter.avg
@@ -239,6 +235,7 @@ def main():
 
     # set the data loader
     data_folder = os.path.join(args.data_folder, 'train')
+    # data_folder = args.data_folder
 
     image_size = 224
     mean = [0.485, 0.456, 0.406]
@@ -266,28 +263,30 @@ def main():
         raise NotImplementedError('augmentation not supported: {}'.format(args.aug))
 
     # TOMO
-    train_dataset = ImageFolderInstance(data_folder, transform=train_transform, two_crop=True)#args.moco)
-    # train_dataset = TMSDataset(root_dir=data_folder)
-    print(len(train_dataset))
+    # train_dataset = ImageFolderInstance(data_folder, transform=train_transform, two_crop=True)#args.moco)
+    train_dataset = config.dataset['cls'](
+        transform=[config.transforms_q, config.transforms_k],
+        **config.dataset['params']
+    )
     train_sampler = None
     train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-        num_workers=args.num_workers, pin_memory=True, sampler=train_sampler)
+        train_dataset, batch_size=config.batch_size, shuffle=(train_sampler is None),
+        num_workers=config.workers, pin_memory=True, sampler=train_sampler)
 
     # create model and optimizer
     n_data = len(train_dataset)
 
     if args.model == 'resnet50':
-        # model_q = ResnetThreshold(resnet50, {'num_classes': 2, 'in_channels': 16})
-        # model_k = ResnetThreshold(resnet50, {'num_classes': 2, 'in_channels': 16})
-        model_q = InsResNet50()
-        model_k = InsResNet50()
-    elif args.model == 'resnet50x2':
-        model_q = InsResNet50(width=2)
-        model_k = InsResNet50(width=2)
-    elif args.model == 'resnet50x4':
-        model_q = InsResNet50(width=4)
-        model_k = InsResNet50(width=4)
+        model_q = config.model['cls'](**config.model['params'])
+        model_k = config.model['cls'](**config.model['params'])
+    #     model_q = InsResNet50()
+    #     model_k = InsResNet50()
+    # elif args.model == 'resnet50x2':
+    #     model_q = InsResNet50(width=2)
+    #     model_k = InsResNet50(width=2)
+    # elif args.model == 'resnet50x4':
+    #     model_q = InsResNet50(width=4)
+    #     model_k = InsResNet50(width=4)
     else:
         raise NotImplementedError('model not supported {}'.format(args.model))
 
@@ -295,7 +294,8 @@ def main():
     moment_update(model_q, model_k, 0)
 
     # set the contrast memory (queue of K keys) and criterion
-    contrast = MemoryMoCo(128, n_data, args.nce_k, args.nce_t, args.softmax).cuda(args.gpu)
+    contrast = MemoryMoCo(config.model['params']['params']['num_classes'], n_data, 
+                                        args.nce_k, args.nce_t, args.softmax).cuda(args.gpu)
 
     criterion = NCESoftmaxLoss() if args.softmax else NCECriterion(n_data)
     criterion = criterion.cuda(args.gpu)
